@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ParkingLayoutApp from "./ParkingLayoutApp.jsx";
 import { apiRequest, authStore } from "./api.js";
 import {
@@ -80,7 +80,7 @@ function Brand({ compact = false }) {
 
 function getRoute() {
   const hash = window.location.hash.replace(/^#\/?/, "");
-  return hash.startsWith("app/") ? hash.slice(4) : hash || "home";
+  return hash || "home";
 }
 
 function App() {
@@ -462,7 +462,7 @@ function Portal({ route, user, onLogout }) {
       <main className="portal-content">
         {lotsError && <div className="portal-alert" role="alert">{lotsError}</div>}
         {page === "dashboard" && (admin ? <AdminDashboard lots={lots} lotId={lotId} onLotChange={setLotId} /> : <UserDashboard user={user} lots={lots} selectedLot={selectedLot} onLotChange={setLotId} />)}
-        {(page === "availability" || page === "claim") && !admin && <AvailabilityPage lots={lots} selectedLot={selectedLot} onLotChange={setLotId} />}
+        {(page === "availability" || page === "claim") && !admin && <AvailabilityPage lots={lots} selectedLot={selectedLot} onLotChange={setLotId} claimMode={page === "claim"} />}
         {page === "lots" && admin && <LotsPage lots={lots} onLotsUpdated={setLots} />}
         {page === "spaces" && admin && <SpacesPage selectedLot={selectedLot} />}
         {page === "layout" && admin && <div className="embedded-editor"><ParkingLayoutApp initialLotSlug={selectedLot?.slug} /></div>}
@@ -629,12 +629,13 @@ function AdminDashboard({ lots, lotId, onLotChange }) {
   </div>;
 }
 
-function AvailabilityPage({ lots, selectedLot, onLotChange }) {
+function AvailabilityPage({ lots, selectedLot, onLotChange, claimMode = false }) {
   const { spaces, loading, error, refresh } = useLotSpaces(selectedLot);
   const [camera, setCamera] = useState("camera-1");
   const [layout, setLayout] = useState(null);
   const [layoutLoading, setLayoutLoading] = useState(false);
   const [layoutError, setLayoutError] = useState("");
+  const layoutRequestId = useRef(0);
   const [selectedSpace, setSelectedSpace] = useState(null);
   const [claimCode, setClaimCode] = useState("");
   const [claimToken, setClaimToken] = useState("");
@@ -644,13 +645,18 @@ function AvailabilityPage({ lots, selectedLot, onLotChange }) {
   const [claimBusy, setClaimBusy] = useState(false);
 
   const loadLayout = useCallback(async () => {
+    const requestId = ++layoutRequestId.current;
     if (!selectedLot) { setLayout(null); return; }
     setLayoutLoading(true); setLayoutError(""); setLayout(null);
     try {
       const result = await apiRequest(`/layouts/${encodeURIComponent(selectedLot.slug)}/${encodeURIComponent(camera)}`);
+      if (requestId !== layoutRequestId.current) return;
       setLayout(result);
-    } catch (err) { setLayoutError(err.message); }
-    finally { setLayoutLoading(false); }
+    } catch (err) {
+      if (requestId === layoutRequestId.current) setLayoutError(err.message);
+    } finally {
+      if (requestId === layoutRequestId.current) setLayoutLoading(false);
+    }
   }, [selectedLot, camera]);
   useEffect(() => {
     if (!selectedLot) return;
@@ -722,7 +728,7 @@ function AvailabilityPage({ lots, selectedLot, onLotChange }) {
   };
 
   return <div className="page-stack">
-    <PageHeading eyebrow="LIVE PARKING VIEW" title="Parking availability" description="Mapped spaces are matched to the selected lot’s live parking records." actions={<button className="button button-outline" onClick={refresh}><span className="refresh-mark">↻</span> Refresh status</button>} />
+    <PageHeading eyebrow={claimMode ? "CLAIM A PARKING SPACE" : "LIVE PARKING VIEW"} title={claimMode ? "Claim parking" : "Parking availability"} description={claimMode ? "Select an occupied, unclaimed space on the map, then enter its claim code to start." : "Mapped spaces are matched to the selected lot’s live parking records."} actions={<button className="button button-outline" onClick={refresh}><span className="refresh-mark">↻</span> Refresh status</button>} />
     {!lots.length && !loading && <div className="portal-alert">No parking lots are configured in the backend.</div>}
     <section className="panel map-controls"><LotPicker lots={lots} value={selectedLot?.lot_id || ""} onChange={onLotChange} /><label className="camera-input"><span>Camera ID</span><input value={camera} onChange={(event) => setCamera(event.target.value)} placeholder="Camera ID" /><small>No camera-list endpoint is currently available.</small></label><button className="button button-outline" onClick={() => { loadLayout(); refresh(); }}>Refresh map</button></section>
     {(error || layoutError) && <div className="portal-alert" role="alert">{error || layoutError}<button onClick={() => { loadLayout(); refresh(); }}>Retry</button></div>}
@@ -746,7 +752,7 @@ function AvailabilityPage({ lots, selectedLot, onLotChange }) {
         <section className="panel map-stat-panel"><PanelTitle title="Occupancy" description="Matched parking records" /><div className="occupancy-ring" style={{ "--occupancy": `${spaces.length ? Math.round((statusCounts.occupied || 0) / spaces.length * 100) : 0}%` }}><div><strong>{spaces.length ? Math.round((statusCounts.occupied || 0) / spaces.length * 100) : 0}%</strong><span>occupied</span></div></div><div className="map-stat-list"><span><i className="legend-vacant" />Vacant <strong>{statusCounts.vacant || 0}</strong></span><span><i className="legend-occupied" />Occupied <strong>{statusCounts.occupied || 0}</strong></span><span><i className="legend-unknown" />Unknown / unmatched <strong>{layout?.spaces?.filter((space) => !slotsByName.has(space.slot_number.trim().toLocaleLowerCase())).length || 0}</strong></span></div><button className="button button-outline full-width" onClick={refresh}>Refresh occupancy</button></section>
         <section className="panel space-detail-panel"><PanelTitle title="Space details" description={selectedSpace ? "Selected parking space" : "Select a space on the map"} />
           {!selectedSpace ? <div className="empty-state compact-empty"><span className="empty-icon"><Icon name="parking" size={20} /></span><span>Select a mapped space to view live details.</span></div> : <><div className="space-detail-heading"><span className={`detail-status ${selectedRecord?.status || "unknown"}`} /><div><strong>{selectedSpace.slot_number}</strong><small>{selectedLot?.name || "Parking lot"}</small></div></div><DetailRow label="Status" value={selectedRecord?.status || "Unknown / no matching parking record"} /><DetailRow label="Current rate" value={selectedRecord ? `₹${Number(selectedRecord.current_rate).toFixed(2)} / hour` : "Not available"} /><DetailRow label="Last updated" value={selectedRecord?.last_updated ? new Date(selectedRecord.last_updated).toLocaleString() : "Not provided"} />
-            {selectedRecord?.status === "occupied" && selectedRecord.user_id == null && <form className="claim-form" onSubmit={initiateClaim}><label>Claim code<input value={claimCode} onChange={(event) => setClaimCode(event.target.value)} placeholder="Enter the code provided" required disabled={Boolean(claimToken)} /></label>{claimToken ? <><p className="claim-timer">Confirmation expires in <strong>{claimTime}s</strong></p><button className="button button-primary full-width" type="button" disabled={claimBusy || claimTime <= 0} onClick={confirmClaim}>{claimBusy ? "Confirming…" : "Confirm claim"}</button></> : <button className="button button-primary full-width" disabled={claimBusy}>{claimBusy ? "Checking code…" : "Initiate claim"}</button>}</form>}
+            {selectedRecord?.status === "occupied" && selectedRecord.user_id == null ? <form className="claim-form" onSubmit={initiateClaim}><label>Claim code<input value={claimCode} onChange={(event) => setClaimCode(event.target.value)} placeholder="Enter the code provided" required disabled={Boolean(claimToken)} /></label>{claimToken ? <><p className="claim-timer">Confirmation expires in <strong>{claimTime}s</strong></p><button className="button button-primary full-width" type="button" disabled={claimBusy || claimTime <= 0} onClick={confirmClaim}>{claimBusy ? "Confirming…" : "Confirm claim"}</button></> : <button className="button button-primary full-width" disabled={claimBusy}>{claimBusy ? "Checking code…" : "Initiate claim"}</button>}</form> : claimMode && <p className="muted-paragraph">{selectedRecord?.status === "occupied" ? "This space is already claimed." : "Claims are available only for occupied spaces. Wait for a car to park, then select the red space."}</p>}
             {claimMessage && <div className={`claim-result ${claimError ? "claim-result-error" : "claim-result-success"}`} role="status">{claimMessage}</div>}
           </>}
         </section>
