@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import time
-import threading
 
 from layout.layout_manager import load_layout
 from layout.layout_sync import synchronize_layout
@@ -111,12 +110,6 @@ def draw_overlay(frame, layout, vehicles, tracker_states, slot_detections=None):
             )
     return output
 
-def update_api(updater, changes):
-    try:
-        updater.apply_changes(changes)
-    except Exception as e:
-        print(f"API update failed: {e}")
-
 def main():
     layout = load_layout("simulator", "default")
     video = cv2.VideoCapture(LIVE_FEED_URL)
@@ -191,7 +184,7 @@ def main():
         changes = pipeline.process_frame(frame)
         if changes:
             print(f"Confirmed changes: {changes}")
-            threading.Thread(target = update_api, args = (updater, changes), daemon = True).start()
+            updater.apply_changes(changes)
 
         annotated_frame = draw_overlay(
             frame,
@@ -208,6 +201,7 @@ def main():
     video.release()
     writer.release()
     cv2.destroyAllWindows()
+    updater.close()
     print(f"Annotated video saved to: {OUTPUT_VIDEO_PATH}")
 
 if __name__ == "__main__":

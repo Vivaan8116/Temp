@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.auth import require_admin, require_admin_or_detection_token
 from app.models.parking import ParkingRecord
 from app.models.history import ParkingHistory
 from app.models.fare_history import FareHistory
@@ -12,6 +13,7 @@ from app.schemas.parking import (ParkingCreate, ParkingResponse, ParkingStatusUp
 from app.services.fare_engine import (calculate_occupancy, select_fare_rule, generate_fare_interval)
 
 from app.schemas.parking import ParkingBulkCreate, ParkingBulkResult
+from app.services.audit import record_event
 from decimal import Decimal
 from datetime import datetime
 import secrets
@@ -32,7 +34,7 @@ def get_parking_spaces(lot_id: int | None = None, db: Session = Depends(get_db))
     return parking_spaces
 
 @router.post("/", response_model = ParkingResponse, status_code = 201)
-def create_parking_space(parking: ParkingCreate, db: Session = Depends(get_db)):
+def create_parking_space(parking: ParkingCreate, request: Request, db: Session = Depends(get_db), current_user = Depends(require_admin)):
     lot = resolve_lot(db, parking.lot_id)
     existing_parking = db.query(ParkingRecord).filter(
         ParkingRecord.lot_id == lot.lot_id,
@@ -53,6 +55,8 @@ def create_parking_space(parking: ParkingCreate, db: Session = Depends(get_db)):
     )
     try:
         db.add(new_parking)
+        db.flush()
+        record_event(db, request, "parking_space.created", f"Created parking space '{new_parking.slot_number}' in lot {lot.lot_id}.", current_user.user_id)
         db.commit()
 
     except IntegrityError:
@@ -62,7 +66,7 @@ def create_parking_space(parking: ParkingCreate, db: Session = Depends(get_db)):
     return new_parking
 
 @router.post("/bulk", response_model=ParkingBulkResult, status_code=201)
-def create_parking_spaces_bulk(payload: ParkingBulkCreate, db: Session = Depends(get_db)):
+def create_parking_spaces_bulk(payload: ParkingBulkCreate, request: Request, db: Session = Depends(get_db), actor = Depends(require_admin_or_detection_token)):
     lot = resolve_lot(db, payload.lot_id)
     requested_slots = [space.slot_number for space in payload.spaces]
     if len(set(requested_slots)) != len(requested_slots):
@@ -91,6 +95,10 @@ def create_parking_spaces_bulk(payload: ParkingBulkCreate, db: Session = Depends
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="A concurrent slot or claim-code conflict occurred; retry sync")
+    if new_records:
+        actor_user_id = actor.user_id if actor is not None else None
+        record_event(db, request, "parking.spaces_bulk_created", f"Detection sync created {len(new_records)} parking spaces in lot {lot.lot_id}.", actor_user_id)
+        db.commit()
     records = db.query(ParkingRecord).filter(
         ParkingRecord.lot_id == lot.lot_id,
         ParkingRecord.slot_number.in_(requested_slots),
@@ -102,7 +110,7 @@ def create_parking_spaces_bulk(payload: ParkingBulkCreate, db: Session = Depends
     }
 
 @router.put("/{parking_id}", response_model = ParkingResponse)
-def update_parking_status(parking_id: int, parking_update: ParkingStatusUpdate, lot_id: int | None = None, db: Session = Depends(get_db)):
+def update_parking_status(parking_id: int, parking_update: ParkingStatusUpdate, request: Request, lot_id: int | None = None, db: Session = Depends(get_db), actor = Depends(require_admin_or_detection_token)):
     query = db.query(ParkingRecord).filter(ParkingRecord.parking_id == parking_id)
     if lot_id is not None:
         query = query.filter(ParkingRecord.lot_id == lot_id)
@@ -190,5 +198,13 @@ def update_parking_status(parking_id: int, parking_update: ParkingStatusUpdate, 
         parking.status = new_status
     
     parking.last_updated = current_time
+    actor_user_id = actor.user_id if actor is not None else None
+    record_event(
+        db,
+        request,
+        "parking.status_changed",
+        f"Parking space '{parking.slot_number}' changed from {old_status} to {new_status}.",
+        actor_user_id,
+    )
     db.commit()
     return parking

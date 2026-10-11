@@ -77,13 +77,6 @@ def estimate_frame_to_reference(reference, frame):
     return np.linalg.inv(reference_to_frame), inliers
 
 
-def update_api(updater, changes):
-    try:
-        updater.apply_changes(changes)
-    except Exception as error:
-        print(f"API update failed: {error}")
-
-
 def parse_args():
     env = dotenv_values(DETECTION_DIR / ".env")
     parser = argparse.ArgumentParser(
@@ -242,7 +235,6 @@ def main():
     overlay_mask = None
     detection_executor = ThreadPoolExecutor(max_workers=1)
     pending_detection = None
-    update_executor = ThreadPoolExecutor(max_workers=1) if updater is not None else None
     initial_snapshot_reported = False
 
     def accept_detection_result(future):
@@ -266,8 +258,8 @@ def main():
         _, overlay_mask = cv2.threshold(overlay_gray, 0, 255, cv2.THRESH_BINARY)
         if changes:
             print(f"Confirmed changes: {changes}")
-            if update_executor is not None:
-                update_executor.submit(update_api, updater, changes)
+            if updater is not None:
+                updater.apply_changes(changes)
         return changes
 
     overlay_frame = draw_overlay(
@@ -347,8 +339,8 @@ def main():
         video.release()
         writer.release()
         detection_executor.shutdown(wait=True)
-        if update_executor is not None:
-            update_executor.shutdown(wait=True)
+        if updater is not None:
+            updater.close()
         if not args.no_preview:
             cv2.destroyAllWindows()
 

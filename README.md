@@ -5,7 +5,7 @@ A Python project for managing parking spaces, tracking occupancy, and calculatin
 backend/      FastAPI API, SQLAlchemy models, authentication, and fare scheduler
 detection/    Vehicle detection, occupancy tracking, parking layout tools, and API sync
 simulator/   Standalone Pygame parking lot simulation
-frontend/    React-based lot/camera parking-layout review and polygon editor
+frontend/    React web application and the lot/camera parking-layout polygon editor
 
 ## Requirements
 - Python 3.10 or later
@@ -23,19 +23,45 @@ python -m pip install -r requirements.txt
 
 Run equivalent `pip install -r requirements.txt` commands from each subsection for those components
 
+For local detection and simulator development on Windows, use a dedicated environment rather than the backend environment. From the project root, run:
+
+```powershell
+cd detection
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r ..\simulator\requirements.txt
+```
+
+Use `.\.venv\Scripts\python.exe` to run detection scripts. To start the simulator, open a second PowerShell terminal, change to the `simulator` directory, and run `..\detection\.venv\Scripts\python.exe main.py`. The detector-to-API updater retries transient network errors, HTTP 408/429 responses, and server errors with capped exponential backoff; permanent client errors are logged and not retried.
+
 ## Configuration
 A) The backend reads `.env` from its current working directory. Create `backend/.env` with:
 
 DATABASE_URL = mysql+pymysql://USER:PASSWORD@HOST:3306/DATABASE \n
 SECRET_KEY = replace-with-a-long-random-secret
+DETECTION_API_TOKEN = replace-with-a-long-random-service-token
 
 B) The detection layout synchronization module reads `detection/.env` and expects:
 
 API_URL = http://localhost:8000
 PARKING_LOT_SLUG = simulator
 CAMERA_ID = default
+DETECTION_API_TOKEN = same-long-random-service-token-as-backend
 
 Keep real credentials and secret keys out of version control. The backend creates its database tables at startup; the configured database must already exist and be reachable
+
+Email-based password recovery and two-step verification also need SMTP settings in `backend/.env`:
+
+```dotenv
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_FROM=parking@example.com
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_USE_SSL=false
+FRONTEND_URL=http://localhost:5173/#/reset-password
+```
+
+Use your mail provider's required TLS mode and credentials; use port 465 with `SMTP_USE_SSL=true` when required. Missing SMTP configuration is reported explicitly. Reset-request delivery failures are recorded for administrators while the public endpoint keeps its response generic to avoid disclosing whether an account exists.
 
 ## Run the backend
 From the `backend` directory, with its dependencies and `.env` configured:
@@ -52,10 +78,20 @@ The API exposes:
 - `PUT /parking/{parking_id}?lot_id=...` to update a space's `vacant` or `occupied` status within the selected lot
 - `POST /auth/register` and `POST /auth/login` for user registration and bearer-token login
 - `GET /auth/me` for the authenticated user's profile
+- `GET /users/me/parking`, `/users/me/history`, `/users/me/reports`, and `/users/me/login-activity` for the authenticated user's own records
+- `PUT /users/me/password` to change the authenticated user's password
+- `GET /admin/reports`, `/admin/activity`, `/admin/login-activity`, `/admin/users`, and `/admin/users/{user_id}` for administrator-only reports and read-only user/audit views
+- `GET /admin/fare-rules`, `POST /admin/fare-rules`, and `PATCH /admin/fare-rules/{rule_id}` for administrator-only fare-rule management; the fare engine continues to manage the active flag
+- `POST /auth/password-reset/request` and `/auth/password-reset/complete` for email-based password reset
+- `/auth/mfa/setup`, `/auth/mfa/enable`, `/auth/mfa/disable/request`, `/auth/mfa/verify`, `/auth/mfa/resend`, and `DELETE /auth/mfa` for email-code two-step verification
 - `POST /parking/{parking_id}/claim/initiate` and `/confirm` for authenticated parking claims
 - `GET` and `PUT /layouts/{lot_slug}/{camera_id}` to load/save validated camera-specific layouts through the detection layout manager
 
+Lot creation (`POST /lots/`), manual space creation (`POST /parking/`), and layout saves (`PUT /layouts/...`) require an authenticated administrator bearer token. The detection synchronization endpoint `POST /parking/bulk` and occupancy status endpoint `PUT /parking/{parking_id}` require either an administrator bearer token or the shared `DETECTION_API_TOKEN` sent in `X-Detection-Token`. Configure the same strong, private token in `backend/.env` and `detection/.env`; never commit it. Detector request and response payloads remain unchanged.
+
 Fare rules, occupancy percentages, current rates and active parking histories are scoped by lot. The scheduler processes each lot independently and records fare intervals at 15-minute boundaries while the API process is running. Claims are associated with the lot of their parking record; the same user may hold one active claim per lot.
+
+The backend creates the new `audit_events`, `email_challenges`, `password_reset_tokens`, and `user_security` tables additively at startup; no existing table columns are changed. The admin activity endpoint includes available login, claim, lot/space, layout, fare-rule, password, and MFA events. Session reports expose recorded occupancy-start timestamps; these are not guaranteed to be the vehicle's actual arrival time. Reported amounts are recorded fares, not confirmed payments. Registration creates normal user accounts; administrator roles must be provisioned by a trusted operator and cannot be self-selected.
 
 ### Multi-lot MySQL migration (manual, required)
 
@@ -95,14 +131,16 @@ python test_layout.py --lot campus-west --camera gate-a --export-review
 
 This detects candidates from `parking_layout.png` and writes a timestamped review bundle under `detection/layout/review_sessions/`. Use `--image path\to\frame.png` for another source image. The bundle preserves the original detector candidate IDs and polygons for import into the React editor.
 
-B) From `frontend`, install and start the editor:
+B) From `frontend`, install and start the web application:
 
 ```powershell
-npm install
+npm ci
 npm run dev
 ```
 
-Open the Vite URL, choose the same original image and import the JSON review bundle. The editor supports drawing missed spaces, removing detections, renaming slots, dragging polygon vertices, and undo/redo. Enter the lot slug and camera ID, then save. The backend validates and writes the existing `{"spaces":[{"slot_number":"...","polygon":[[x,y], ...]}]}` schema via `layout_manager.save_layout`, into a separate `detection/layout/layouts/<lot>/<camera>.json` file. Start the backend first; its development CORS policy allows the local Vite origins.
+Open the Vite URL for the public ParkingSpace website. Set `VITE_API_BASE_URL` in the frontend environment if the backend is not at `http://localhost:8000`. Login and registration use the existing bearer-token APIs, including email-code MFA challenges when enabled. The user portal connects active parking, history, personal reports, login activity, password changes, password reset and two-step verification to the authenticated API routes. The camera-specific polygon map loads `/layouts/{lot_slug}/{camera_id}`, joins configured identifiers to live parking records and refreshes occupancy; the admin portal connects reports, fare rules, read-only user management, event logs and login activity to admin-only routes. It preserves the existing layout editor, including candidate import, manual drawing, removal, renaming, vertex editing, undo/redo, validation, and save. Layout saves, fare-rule operations, lot creation and management APIs require an account whose backend role is `admin`; registration creates normal user accounts only. Configure SMTP for password reset and MFA email delivery. Start the backend first; its development CORS policy allows the local Vite origins.
+
+Personal parking sessions/history/reports, administrator reports, read-only user management, audit/login activity, fare-rule management, password recovery, and email-code two-step verification are now exposed by the backend. Password recovery and two-step verification require working SMTP settings. The public availability preview and user/admin space summaries use real `GET /lots/` and `GET /parking/` data when the backend is reachable; the remaining portal screens still need to be wired to these newly added endpoints.
 
 C) In powershell terminal
 python test_pipeline.py

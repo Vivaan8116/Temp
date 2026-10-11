@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiRequest } from "./api.js";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const defaultName = (index) => `P${String(index + 1).padStart(2, "0")}`;
@@ -67,9 +68,8 @@ function validateEntries(entries, dimensions) {
   return { spaces, errors };
 }
 
-export default function ParkingLayoutApp() {
-  const [apiBase, setApiBase] = useState("http://localhost:8000");
-  const [lotSlug, setLotSlug] = useState("simulator");
+export default function ParkingLayoutApp({ initialLotSlug }) {
+  const [lotSlug, setLotSlug] = useState(initialLotSlug || "simulator");
   const [cameraId, setCameraId] = useState("default");
   const [imageUrl, setImageUrl] = useState("");
   const [dimensions, setDimensions] = useState(null);
@@ -92,6 +92,7 @@ export default function ParkingLayoutApp() {
 
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   useEffect(() => () => { if (imageUrl) URL.revokeObjectURL(imageUrl); }, [imageUrl]);
+  useEffect(() => { if (initialLotSlug) setLotSlug(initialLotSlug); }, [initialLotSlug]);
 
   const includedEntries = useMemo(() => entries.filter((entry) => entry.included), [entries]);
   const validation = useMemo(() => {
@@ -204,9 +205,7 @@ export default function ParkingLayoutApp() {
   const loadSavedLayout = async () => {
     setError(""); setNotice("");
     try {
-      const response = await fetch(`${apiBase.replace(/\/$/, "")}/layouts/${encodeURIComponent(lotSlug)}/${encodeURIComponent(cameraId)}`);
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || `Load failed (${response.status})`);
+      const data = await apiRequest(`/layouts/${encodeURIComponent(lotSlug)}/${encodeURIComponent(cameraId)}`);
       const loaded = data.spaces.map((space) => ({
         id: `saved:${space.slot_number}`, detectorCandidateId: null, label: space.slot_number,
         source: "saved", className: "saved layout", polygon: clone(space.polygon),
@@ -332,11 +331,9 @@ export default function ParkingLayoutApp() {
         polygon: space.polygon.map(([x, y]) => [Math.round(x), Math.round(y)]),
       })) };
       const bounds = new URLSearchParams({ image_width: String(dimensions.width), image_height: String(dimensions.height) });
-      const response = await fetch(`${apiBase.replace(/\/$/, "")}/layouts/${encodeURIComponent(lotSlug)}/${encodeURIComponent(cameraId)}?${bounds}`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(layout),
+      const data = await apiRequest(`/layouts/${encodeURIComponent(lotSlug)}/${encodeURIComponent(cameraId)}?${bounds}`, {
+        method: "PUT", body: JSON.stringify(layout),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || `Save failed (${response.status})`);
       setNotice(`Saved ${data.space_count} reviewed spaces for ${lotSlug} / ${cameraId}.`);
     } catch (err) { setError(err.message || "Could not save the layout."); }
   };
@@ -360,7 +357,6 @@ export default function ParkingLayoutApp() {
         </section>
 
         <section className="scope-card">
-          <label className="field api-field"><span>API server</span><input value={apiBase} onChange={(e) => setApiBase(e.target.value)} /></label>
           <label className="field"><span>Parking lot</span><input value={lotSlug} onChange={(e) => setLotSlug(e.target.value)} placeholder="campus-west" /></label>
           <label className="field"><span>Camera ID</span><input value={cameraId} onChange={(e) => setCameraId(e.target.value)} placeholder="gate-a" /></label>
           <button className="button secondary load-button" onClick={loadSavedLayout}>Load saved layout</button>

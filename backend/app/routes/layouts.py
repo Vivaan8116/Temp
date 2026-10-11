@@ -2,8 +2,13 @@ import re
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from app.auth import require_admin
+from app.models.users import User
+from app.database import get_db
+from app.services.audit import record_event
+from sqlalchemy.orm import Session
 
 # Reuse the detection package's canonical validator and lot/camera path manager.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -47,8 +52,11 @@ def put_camera_layout(
     lot_slug: str,
     camera_id: str,
     layout: LayoutPayload,
+    request: Request,
     image_width: int = Query(gt=0),
     image_height: int = Query(gt=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
 ):
     _validate_scope(lot_slug, camera_id)
     try:
@@ -57,4 +65,6 @@ def put_camera_layout(
         save_layout(data, lot_slug, camera_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    record_event(db, request, "layout.updated", f"Saved parking layout for {lot_slug}/{camera_id} with {len(layout.spaces)} spaces.", current_user.user_id)
+    db.commit()
     return {"saved": True, "lot_slug": lot_slug, "camera_id": camera_id, "space_count": len(layout.spaces)}
